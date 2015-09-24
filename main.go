@@ -126,10 +126,6 @@ func createFile(filename string) *os.File {
 }
 
 func logFileDiscover(p Param) *string {
-//	// TODO XXX seiti - remove line below. this one is a good log, as it is very small (241 lines)
-//	test := aws.String("error/postgresql.log.2015-09-24-10")
-//	log.Debugln(test)
-//	return test
 	resp := listLogFiles(p)
 	last := resp.DescribeDBLogFiles[len(resp.DescribeDBLogFiles) -1]
 	log.WithFields(log.Fields{"pglog_discovered": last}).Info()
