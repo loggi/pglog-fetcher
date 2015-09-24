@@ -1,2 +1,2 @@
-# pglogfetcher
-Fetches log
+# pglog-fetcher
+Fetches log from AWS RDS
