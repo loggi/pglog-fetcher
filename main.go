@@ -13,6 +13,18 @@ import (
 	"strings"
 )
 
+type Param struct {
+	svc *rds.RDS
+	instanceId *string
+	fetchNap *time.Duration
+	chunkSize *int64
+	portionNap *time.Duration
+	retrievedFileDir *string
+	runAsService *bool
+}
+
+var p Param
+
 // Dowloads
 func main() {
 
@@ -20,10 +32,12 @@ func main() {
 	region := flag.String("region", "sa-east-1", "AWS region code.") // default is 'são paulo' region
 	retries := flag.Int("retries", 10, "Number of retries")
 	chunkSize := flag.Int64("chunk-size", int64(100), "Size of each portion fetched")
-	napDuration := flag.Duration("nap-duration", 500 * time.Millisecond, "Nap time between portion fetch")
+	fetchNap := flag.Duration("fetch-nap", 5 * time.Minute, "Nap time between fetches. Each fetch usually creates a single file")
+	portionNap := flag.Duration("portion-nap", 5 * time.Second, "Nap time between each portion fetch")
 	logLevel := flag.String("log-level", "info", "Log level of this app, not RDS PG, as defined by logrus package")
 	instanceId := flag.String("instance-id", "theInstanceId", "RDS instance id") // this one is mandatory, shouldn't be really a flag. oh well...
 	retrievedFileDir := flag.String("retrieved-file-dir", "/tmp", "Dir where to put downloaded files")
+	runAsService := flag.Bool("service", false, "Should run indefinitely.")
 	flag.Parse()
 
 	if len(os.Args) <= 1 {
@@ -37,87 +51,114 @@ func main() {
 
 	log.Infoln("All set. Starting.")
 
+	svc := rds.New(aws.NewConfig().WithRegion(*region).WithMaxRetries(*retries))
+	p = Param {
+		svc: svc,
+		instanceId: instanceId,
+		fetchNap: fetchNap,
+		chunkSize: chunkSize,
+		portionNap: portionNap,
+		retrievedFileDir: retrievedFileDir,
+		runAsService: runAsService,
+	}
+
 	// Steps
 	//
 	// Looping while true (has to run as a service after daemonizing it)
 	//     Loop until discover file to download (check recover situations)
 	//     Loop while the file has content not downloaded AND there is no new file to download
 	//         download, append and save file content
-	svc := rds.New(aws.NewConfig().WithRegion(*region).WithMaxRetries(*retries))
+	firstLoop := true
+	var marker = "0"
+	var currMarker = "0"
+	var pglog *string
+	for *p.runAsService || firstLoop {
+		currPglog := logFileDiscover(p)
 
-	logFilename := logFileDiscover(svc, instanceId)
-	portion, _ := downloadLogFilePortion(svc, instanceId, logFilename, "0", *chunkSize)
+		// transition time!
+		if pglog != nil && currPglog != pglog {
+			// retrieve remainder of currPgLog
+			fetchData(p, pglog, &marker)
+			pglog = currPglog
+			marker = "0"
+		}
 
-	filename := *retrievedFileDir + "/" + *logFilename
-	splitedPath := strings.Split(filename, "/")
-	dir := strings.Join(splitedPath[:len(splitedPath) -1], "/")
-	os.MkdirAll(dir, 0700)
-	log.WithFields(log.Fields{
-		"filename": filename,
-		"splitedPath": splitedPath,
-		"dir": dir,
-	}).Info()
+		currMarker = fetchData(p, currPglog, &currMarker)
+		firstLoop = false
+		time.Sleep(*p.fetchNap)
+	}
+	log.Infoln("Done. Should not get here, really.")
+}
 
-	f, err := os.Create(filename)
-	check(err, "Error creating", log.Fields{"filename":  filename})
+// Fetches the log data from RDS.
+func fetchData(p Param, pglog *string, marker *string) string {
+	currMarker := marker
+	portion := downloadLogFilePortion(p, pglog, *currMarker)
+	filename := *p.retrievedFileDir + "/" + *pglog + "_" + fmt.Sprintf("%v", time.Now().Unix())
+	f := createFile(filename)
 	defer f.Close()
-
-	_, err = f.WriteString(*portion.LogFileData)
+	_, err := f.WriteString(*portion.LogFileData)
 	check(err, "Couldn't write to file", log.Fields{"filename" :filename})
-
-	// check current and expected number of lines
 	for *portion.AdditionalDataPending {
-		time.Sleep(*napDuration)
-		portion, _ = downloadLogFilePortion(svc, instanceId, logFilename, *portion.Marker, *chunkSize)
+		log.Debugln("ZZZzzzz...")
+		time.Sleep(*p.portionNap)
+		currMarker = portion.Marker
+		portion = downloadLogFilePortion(p, pglog, *currMarker)
 		_, err = f.WriteString(*portion.LogFileData)
 		check(err, "Couldn't write to output file T_T", log.Fields{})
 		f.Sync()
 	}
-
-	log.Infoln("Done. Should not get here, really.")
+	return *portion.Marker
 }
 
-func logFileDiscover(svc *rds.RDS, instanceId *string) *string {
-	// TODO XXX seiti - remove line below. this one is a good log, as it is very small (241 lines)
-	test := aws.String("error/postgresql.log.2015-09-24-10")
-	log.Debugln(test)
-
-	return test
-	// TODO seiti - uncomment
-	//	resp, err := listLogFiles(svc, instanceId)
-	// check(err, "")
-	//	last := resp.DescribeDBLogFiles[len(resp.DescribeDBLogFiles) -1]
-	//	log.Debugln(last)
-	//	return last
+// Creates a file where to put the fetched data.
+func createFile(filename string) *os.File {
+	splittedPath := strings.Split(filename, "/")
+	dir := strings.Join(splittedPath[:len(splittedPath) - 1], "/")
+	os.MkdirAll(dir, 0700)
+	log.WithFields(log.Fields{
+		"filename": filename,
+		"dir": dir,
+	}).Info("Creating/opening file")
+	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+	check(err, "Error creating/openning", log.Fields{"filename":  filename})
+	return f
 }
 
+func logFileDiscover(p Param) *string {
+//	// TODO XXX seiti - remove line below. this one is a good log, as it is very small (241 lines)
+//	test := aws.String("error/postgresql.log.2015-09-24-10")
+//	log.Debugln(test)
+//	return test
+	resp := listLogFiles(p)
+	last := resp.DescribeDBLogFiles[len(resp.DescribeDBLogFiles) -1]
+	log.WithFields(log.Fields{"pglog_discovered": last}).Info()
+	return last.LogFileName
+}
 
-func listLogFiles(svc *rds.RDS, instanceId string) (*rds.DescribeDBLogFilesOutput, error) {
+func listLogFiles(p Param) *rds.DescribeDBLogFilesOutput {
 	params := &rds.DescribeDBLogFilesInput{
-		DBInstanceIdentifier: aws.String(instanceId),
+		DBInstanceIdentifier: p.instanceId,
 	}
-	resp, err := svc.DescribeDBLogFiles(params)
-	check(err, "Couldn't get the logs list", log.Fields{ "instanceId": instanceId})
-	log.Debugln(resp.DescribeDBLogFiles)
-	return resp, err
+	resp, err := p.svc.DescribeDBLogFiles(params)
+	check(err, "Couldn't get the logs list", log.Fields{ "instanceId": p.instanceId})
+	return resp
 }
 
-func downloadLogFilePortion(svc *rds.RDS, instanceId *string, logFilename *string, marker string, nlines int64) (*rds.DownloadDBLogFilePortionOutput, error) {
+func downloadLogFilePortion(p Param, pglog *string, marker string) (*rds.DownloadDBLogFilePortionOutput) {
 	params := &rds.DownloadDBLogFilePortionInput{
-		DBInstanceIdentifier: instanceId,
-		LogFileName:          logFilename,
+		DBInstanceIdentifier: p.instanceId,
+		LogFileName:          pglog,
 		Marker:               aws.String(marker),
-		NumberOfLines:        aws.Int64(nlines),
+		NumberOfLines:        p.chunkSize,
 	}
-
-	log.Debugln(fmt.Sprintf("req marker %v: %v", params.Marker, *params.Marker))
-	resp, err := svc.DownloadDBLogFilePortion(params)
+	log.WithFields(log.Fields{"req_marker_add": params.Marker, "req_marker_value": *params.Marker}).Debug()
+	resp, err := p.svc.DownloadDBLogFilePortion(params)
 	check(err, "Couldn't get a portion of file", log.Fields{ "logFilename":  *params.LogFileName})
-	log.Debugln(fmt.Sprintf("resp marker %v: %v", resp.Marker, *resp.Marker))
-
-	log.Debugln(*resp.LogFileData)
-	log.Debugln(fmt.Sprintf("is additional data pending: '%v'", *resp.AdditionalDataPending))
-	return resp, err
+	log.WithFields(log.Fields{"resp_marker_add": resp.Marker, "resp_marker_value": *resp.Marker}).Debug()
+	log.WithFields(log.Fields{"additional_data_pending": *resp.AdditionalDataPending}).Debug()
+	log.WithFields(log.Fields{"data_len": len(*resp.LogFileData)}).Debug("Fetched chars")
+	return resp
 }
 
 func check(err error, panicMsg string, panicFields log.Fields) {
