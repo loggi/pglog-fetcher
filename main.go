@@ -115,6 +115,7 @@ func fetchData(p Param, pglog *string, marker *string) string {
 	f := createFile(filename)
 	defer f.Close()
 	_, err := f.WriteString(*portion.LogFileData)
+	f.Sync()
 	check(err, "Couldn't write to file", log.Fields{"filename" :filename})
 	for *portion.AdditionalDataPending {
 		log.Debugln("Portion nap ZZZzzzz...")
@@ -122,7 +123,7 @@ func fetchData(p Param, pglog *string, marker *string) string {
 		currMarker = portion.Marker
 		portion = downloadLogFilePortion(p, pglog, *currMarker)
 		_, err = f.WriteString(*portion.LogFileData)
-		check(err, "Couldn't write to output file T_T", log.Fields{})
+		check(err, "Couldn't write to output file T_T", log.Fields{"filename" :filename})
 		f.Sync()
 	}
 	return *portion.Marker
@@ -168,12 +169,19 @@ func downloadLogFilePortion(p Param, pglog *string, marker string) (*rds.Downloa
 		Marker:               aws.String(marker),
 		NumberOfLines:        p.chunkSize,
 	}
-	log.WithFields(log.Fields{"marker_add": params.Marker, "marker_value": *params.Marker}).Debug("Request")
+	log.WithFields(log.Fields{
+		"marker_addr": params.Marker,
+		"marker_value": *params.Marker,
+		"pglog": *pglog,
+	}).Debug("Request")
 	resp, err := p.svc.DownloadDBLogFilePortion(params)
 	check(err, "Couldn't get a portion of file", log.Fields{ "logFilename":  *params.LogFileName})
-	log.WithFields(log.Fields{"marker_add": resp.Marker, "marker_value": *resp.Marker}).Debug("Response")
-	log.WithFields(log.Fields{"additional_data_pending": *resp.AdditionalDataPending}).Debug("Data pending?")
-	log.WithFields(log.Fields{"data_len": len(*resp.LogFileData)}).Debug("Fetched chars")
+	log.WithFields(log.Fields{
+		"marker_addr": resp.Marker,
+		"marker_value": *resp.Marker,
+		"additional_data_pending": *resp.AdditionalDataPending,
+		"fetched_data_len": len(*resp.LogFileData),
+	}).Debug("Response")
 	return resp
 }
 
