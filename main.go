@@ -34,7 +34,7 @@ func main() {
 	retries := flag.Int("retries", 10, "Number of retries")
 	chunkSize := flag.Int64("chunk-size", int64(10000), "Size of each portion fetched")
 	fetchNap := flag.Duration("fetch-nap", 1 * time.Minute, "Nap time between fetches. Each fetch usually creates a single file")
-	portionNap := flag.Duration("portion-nap", 10 * time.Second, "Nap time between each portion fetch")
+	portionNap := flag.Duration("portion-nap", 5 * time.Second, "Nap time between each portion fetch")
 	logLevel := flag.String("log-level", "info", "Log level of this app, not RDS PG, as defined by logrus package")
 	instanceId := flag.String("instance-id", "theInstanceId", "RDS instance id") // this one is mandatory, shouldn't be really a flag. oh well...
 	retrievedFileDir := flag.String("retrieved-file-dir", "/tmp", "Dir where to put downloaded files")
@@ -78,28 +78,34 @@ func main() {
 	//         download, append and save file content
 	firstLoop := true
 	var marker = "0"
-	var currMarker = "0"
-	var pglog = aws.String("")
+	var pglog string
 	for *p.runAsService || firstLoop {
 		currPglog := logFileDiscover(p)
 
-		// transition time!
+		// bootstraping...
+		if firstLoop {
+			pglog = *currPglog
+		}
+		file_switched := *currPglog != pglog
 		log.WithFields(log.Fields{
-			"pglog": *pglog,
+			"pglog": pglog,
 			"currPgLog": *currPglog,
+			"file_switched": file_switched,
 		}).Debug("Transition check")
-		if *pglog != "" && *currPglog != *pglog {
+
+		// transition time!
+		if file_switched {
 			// retrieve remainder of last pglog
 			log.Debug("Transition time! A new log appears!")
-			fetchData(p, pglog, &marker)
-			pglog = currPglog
+			fetchData(p, &pglog, &marker)
+			pglog = *currPglog
 			marker = "0"
 		}
 
-		currMarker = fetchData(p, currPglog, &currMarker)
+		marker = fetchData(p, currPglog, &marker)
 		firstLoop = false
 		log.WithFields(log.Fields{
-			"pglog": *pglog,
+			"pglog": pglog,
 			"currPgLog": *currPglog,
 		}).Debug("Fetching nap ZZZzzzz...")
 		time.Sleep(*p.fetchNap)
@@ -190,14 +196,14 @@ func check(err error, panicMsg string, panicFields log.Fields) {
 	if err == nil {
 		return
 	}
-	log.WithError(err)
+	log.WithError(err).Info()
 	if awsErr, ok := err.(awserr.Error); ok {
 		log.WithFields(log.Fields{
 			"awserr_code": awsErr.Code(),
 			"awserr_msg": awsErr.Message(),
 		}).Error()
 		if origErr := awsErr.OrigErr(); origErr != nil {
-			log.WithError(origErr)
+			log.WithError(origErr).Info()
 		}
 	}
 	log.WithFields(panicFields).Panic(panicMsg)
