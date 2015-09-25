@@ -25,7 +25,8 @@ type Param struct {
 
 var p Param
 
-// Dowloads
+// Downloads last log found at AWS RDS, as it is generated. Does not, currently,
+// get the older logs.
 func main() {
 
 	// flags. love flags.
@@ -71,25 +72,25 @@ func main() {
 	}).Info("All set. Starting.")
 
 	// Steps
-	//
 	// Looping while true (has to run as a service after daemonizing it)
-	//     Loop until discover file to download (check recover situations)
+	//     Discover file to download (TODO check recover situations)
 	//     Loop while the file has content not downloaded AND there is no new file to download
 	//         download, append and save file content
 	firstLoop := true
 	var marker = "0"
 	var currMarker = "0"
-	var pglog *string
+	var pglog = aws.String("")
 	for *p.runAsService || firstLoop {
 		currPglog := logFileDiscover(p)
 
 		// transition time!
-		if pglog != nil && currPglog != pglog {
-			log.WithFields(log.Fields{
-				"pglog": pglog,
-				"currPgLog": currPglog,
-			}).Debug("Transition time!")
-			// retrieve remainder of currPgLog
+		log.WithFields(log.Fields{
+			"pglog": *pglog,
+			"currPgLog": *currPglog,
+		}).Debug("Transition check")
+		if *pglog != "" && *currPglog != *pglog {
+			// retrieve remainder of last pglog
+			log.Debug("Transition time! A new log appears!")
 			fetchData(p, pglog, &marker)
 			pglog = currPglog
 			marker = "0"
@@ -97,7 +98,10 @@ func main() {
 
 		currMarker = fetchData(p, currPglog, &currMarker)
 		firstLoop = false
-		log.Debugln("Fetching nap ZZZzzzz...")
+		log.WithFields(log.Fields{
+			"pglog": *pglog,
+			"currPgLog": *currPglog,
+		}).Debug("Fetching nap ZZZzzzz...")
 		time.Sleep(*p.fetchNap)
 	}
 	log.Infoln("Done. Should not get here, really.")
@@ -138,6 +142,7 @@ func createFile(filename string) *os.File {
 	return f
 }
 
+// Get the log files from AWS RDS and returns the last one found.
 func logFileDiscover(p Param) *string {
 	resp := listLogFiles(p)
 	last := resp.DescribeDBLogFiles[len(resp.DescribeDBLogFiles) -1]
@@ -145,6 +150,7 @@ func logFileDiscover(p Param) *string {
 	return last.LogFileName
 }
 
+// List the log files.
 func listLogFiles(p Param) *rds.DescribeDBLogFilesOutput {
 	params := &rds.DescribeDBLogFilesInput{
 		DBInstanceIdentifier: p.instanceId,
@@ -154,6 +160,7 @@ func listLogFiles(p Param) *rds.DescribeDBLogFilesOutput {
 	return resp
 }
 
+// Download a portion of the given log file. Uses `marker` to control.
 func downloadLogFilePortion(p Param, pglog *string, marker string) (*rds.DownloadDBLogFilePortionOutput) {
 	params := &rds.DownloadDBLogFilePortionInput{
 		DBInstanceIdentifier: p.instanceId,
@@ -170,6 +177,7 @@ func downloadLogFilePortion(p Param, pglog *string, marker string) (*rds.Downloa
 	return resp
 }
 
+// Checks if a error ocurred, panicking it did.
 func check(err error, panicMsg string, panicFields log.Fields) {
 	if err == nil {
 		return
