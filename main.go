@@ -191,7 +191,7 @@ func downloadLogFilePortion(p Param, pglog *string, marker string) (*rds.Downloa
 	return resp
 }
 
-// Checks if a error ocurred, panicking it did.
+// Checks if a error occurred, panicking if it did.
 func check(err error, panicMsg string, panicFields log.Fields) {
 	if err == nil {
 		return
