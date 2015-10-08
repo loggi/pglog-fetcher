@@ -1,4 +1,4 @@
-package main_test
+package pglog_fetcher
 
 import "testing"
 
