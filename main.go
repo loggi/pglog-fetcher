@@ -1,4 +1,4 @@
-package pglog_fetcher
+package main
 
 import (
 	"flag"
